@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
+# © 2026 Мушта Роман Александрович. Все права защищены. Только для личного использования.
 """Обновляет data.json котировками облигаций Московской биржи (ISS API).
+
+© 2026 Мушта Роман Александрович. Все права защищены. Только для личного использования.
 
 Только стандартная библиотека Python. Запуск: python scripts/update_data.py
 Рейтинги ISS не отдаёт, поэтому они берутся из ratings.json (название -> рейтинг)
@@ -120,6 +123,14 @@ def ytm(price, face, coupon, freq, nxt, mat, nkd, today):
     return round((lo + hi) / 2 * 100, 2)
 
 
+def is_qual(s):
+    """Признак «только для квалифицированных инвесторов», если биржа его отдаёт."""
+    for k, v in s.items():
+        if "QUAL" in k.upper() and str(v).strip().lower() in ("1", "true", "y", "yes", "да"):
+            return True
+    return "квалиф" in " ".join(str(s.get(k) or "") for k in ("REMARKS", "SECNAME")).lower()
+
+
 def convert(s, m, is_ofz, ratings, today):
     """Возвращает (облигация, None) или (None, причина пропуска)."""
     secid = s["SECID"]
@@ -146,7 +157,7 @@ def convert(s, m, is_ofz, ratings, today):
         return None, "нет доходности"
     dur, val = num(m.get("DURATION")), num(m.get("VALTODAY"))
     offer = pdate(s.get("OFFERDATE")) or pdate(s.get("BUYBACKDATE"))
-    return {
+    bond = {
         "name": name,
         "mat": mat.isoformat() + "T00:00:00",
         "y": y or 0,
@@ -161,7 +172,44 @@ def convert(s, m, is_ofz, ratings, today):
         "fl": fl,
         "of": offer.strftime("%d.%m.%Y") if offer else "",
         "pk": fl == "ПК",
-    }, None
+    }
+    if is_qual(s):
+        bond["q"] = 1
+    return bond, None
+
+
+def update_history(out, day, keep=250):
+    """Дописывает цены и доходности за день в history.json (только выпуски с рейтингом и ОФЗ)."""
+    hp = ROOT / "history.json"
+    h = {"d": [], "p": {}, "y": {}}
+    if hp.exists():
+        try:
+            h = json.loads(hp.read_text(encoding="utf-8"))
+        except ValueError:
+            pass
+    day = day.isoformat()
+    if not h["d"] or h["d"][-1] != day:
+        h["d"].append(day)
+    n = len(h["d"])
+    idx = n - 1
+    for key in ("p", "y"):
+        for arr in h[key].values():
+            arr.extend([None] * (n - len(arr)))
+    for name, b in out.items():
+        if b["rt"] == "—":
+            continue
+        for key, val in (("p", b["p"]), ("y", b["y"] if b["y"] and b["y"] > 0 else None)):
+            arr = h[key].setdefault(name, [None] * n)
+            arr[idx] = val
+    if n > keep:
+        h["d"] = h["d"][-keep:]
+        for key in ("p", "y"):
+            for name in h[key]:
+                h[key][name] = h[key][name][-keep:]
+    for key in ("p", "y"):
+        h[key] = {k: v for k, v in h[key].items() if any(x is not None for x in v)}
+    hp.write_text(json.dumps(h, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
+    print(f"history.json: {len(h['d'])} дн., {len(h['p'])} выпусков")
 
 
 def main():
@@ -185,6 +233,7 @@ def main():
     for board, is_ofz in BOARDS.items():
         sec, md = fetch_board(board)
         print(f"{board}: получено {len(sec)} выпусков")
+        print("Колонки securities:", ", ".join(next(iter(sec.values()))) if sec else "-")
         if not sec:
             raise SystemExit(f"Пустой ответ по площадке {board}: данные не перезаписываю")
         missing = [c for c in NEED if c not in next(iter(sec.values()))]
@@ -199,7 +248,7 @@ def main():
             else:
                 skipped[why] = skipped.get(why, 0) + 1
 
-    print(f"Облигаций в data.json: {len(out)}; без рейтинга: {len(unrated)}")
+    print(f"Облигаций в data.json: {len(out)}; без рейтинга: {len(unrated)}; для квалифицированных: {sum(1 for b in out.values() if b.get('q'))}")
     print("Пропущено:", json.dumps(skipped, ensure_ascii=False))
     if unrated:
         print("Без рейтинга (первые 30):", ", ".join(unrated[:30]))
@@ -213,6 +262,7 @@ def main():
         "b": sorted(out.values(), key=lambda b: b["name"]),
     }
     dp.write_text(json.dumps(data, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
+    update_history(out, msk.date())
 
 
 if __name__ == "__main__":
