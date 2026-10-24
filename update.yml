@@ -1,0 +1,27 @@
+name: Update bond data
+
+on:
+  schedule:
+    - cron: "0 16 * * 1-5"   # 19:00 по Москве в будни, после основной сессии
+  workflow_dispatch: {}       # ручной запуск кнопкой Run workflow
+
+permissions:
+  contents: write
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Fetch quotes from MOEX ISS
+        run: python scripts/update_data.py
+      - name: Commit data.json
+        run: |
+          git config user.name "bond-bot"
+          git config user.email "bond-bot@users.noreply.github.com"
+          git add data.json history.json
+          git diff --cached --quiet || git commit -m "Update quotes"
+          git push

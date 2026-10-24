@@ -178,6 +178,40 @@ def convert(s, m, is_ofz, ratings, today):
     return bond, None
 
 
+def update_history(out, day, keep=250):
+    """Дописывает цены и доходности за день в history.json (только выпуски с рейтингом и ОФЗ)."""
+    hp = ROOT / "history.json"
+    h = {"d": [], "p": {}, "y": {}}
+    if hp.exists():
+        try:
+            h = json.loads(hp.read_text(encoding="utf-8"))
+        except ValueError:
+            pass
+    day = day.isoformat()
+    if not h["d"] or h["d"][-1] != day:
+        h["d"].append(day)
+    n = len(h["d"])
+    idx = n - 1
+    for key in ("p", "y"):
+        for arr in h[key].values():
+            arr.extend([None] * (n - len(arr)))
+    for name, b in out.items():
+        if b["rt"] == "—":
+            continue
+        for key, val in (("p", b["p"]), ("y", b["y"] if b["y"] and b["y"] > 0 else None)):
+            arr = h[key].setdefault(name, [None] * n)
+            arr[idx] = val
+    if n > keep:
+        h["d"] = h["d"][-keep:]
+        for key in ("p", "y"):
+            for name in h[key]:
+                h[key][name] = h[key][name][-keep:]
+    for key in ("p", "y"):
+        h[key] = {k: v for k, v in h[key].items() if any(x is not None for x in v)}
+    hp.write_text(json.dumps(h, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
+    print(f"history.json: {len(h['d'])} дн., {len(h['p'])} выпусков")
+
+
 def main():
     today = date.today()
     old = {}
@@ -228,6 +262,7 @@ def main():
         "b": sorted(out.values(), key=lambda b: b["name"]),
     }
     dp.write_text(json.dumps(data, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
+    update_history(out, msk.date())
 
 
 if __name__ == "__main__":

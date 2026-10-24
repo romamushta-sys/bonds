@@ -1,0 +1,21 @@
+name: Daily digest
+
+on:
+  schedule:
+    - cron: "0 6 * * 1-5"   # 09:00 по Москве в будни
+  workflow_dispatch: {}
+
+jobs:
+  digest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Send Telegram digest
+        run: python scripts/digest.py
+        env:
+          PLAN_JSON: ${{ secrets.PLAN_JSON }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
