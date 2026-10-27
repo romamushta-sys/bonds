@@ -17,6 +17,7 @@ import sys
 import time
 import urllib.parse
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
@@ -24,6 +25,7 @@ ROOT = Path(__file__).resolve().parent.parent
 BASE = os.environ.get("ISS_BASE", "https://iss.moex.com")
 URL = BASE + "/iss/engines/stock/markets/bonds/boards/{board}/securities.json"
 BOARDS = {"TQOB": True, "TQCB": False}  # True = ОФЗ
+DESC = BASE + "/iss/securities/{secid}.json?iss.meta=off&iss.only=description"
 MIN_BONDS = int(os.environ.get("MIN_BONDS", "50"))
 NEED = ["SECID", "SHORTNAME", "MATDATE", "COUPONVALUE", "NEXTCOUPON", "ACCRUEDINT", "COUPONPERIOD", "FACEVALUE"]
 
@@ -64,7 +66,7 @@ def freq_of(period):
     return min((1, 2, 3, 4, 6, 12), key=lambda k: abs(k - f))
 
 
-def get(url, tries=4):
+def get(url, tries=4, soft=False):
     for i in range(tries):
         try:
             req = urllib.request.Request(url, headers={"User-Agent": "bond-constructor/1.0"})
@@ -73,6 +75,8 @@ def get(url, tries=4):
         except Exception as e:  # noqa: BLE001
             print(f"попытка {i + 1} не удалась: {e}", file=sys.stderr)
             time.sleep(2 * (i + 1))
+    if soft:
+        return None
     raise SystemExit("ISS недоступен: " + url)
 
 
@@ -123,6 +127,48 @@ def ytm(price, face, coupon, freq, nxt, mat, nkd, today):
     return round((lo + hi) / 2 * 100, 2)
 
 
+def qual_status(secid):
+    """1: только для квалифицированных инвесторов, 0: нет, -1: в описании выпуска такого признака нет, None: не удалось получить."""
+    js = get(DESC.format(secid=secid), tries=2, soft=True)
+    if js is None:
+        return None
+    for r in table(js, "description"):
+        name, title = str(r.get("name", "")).upper(), str(r.get("title", "")).lower()
+        if "QUAL" in name or "квалифицирован" in title:
+            return 1 if str(r.get("value", "")).strip().lower() in ("1", "true", "y", "yes", "да") else 0
+    return -1
+
+
+def lookup_qual(sids):
+    if not sids:
+        return {}
+    with ThreadPoolExecutor(max_workers=6) as ex:
+        return dict(zip(sids, ex.map(qual_status, sids)))
+
+
+def apply_qual(out, qc_old):
+    """Убирает выпуски для квалифицированных инвесторов. Возвращает (qc, состояние, сколько убрано)."""
+    sids = [b["sid"] for b in out.values() if b["rt"] != "ОФЗ" and b["sid"] not in qc_old]
+    res = lookup_qual(sids)
+    known = {k: v for k, v in res.items() if v in (0, 1)}
+    qc = dict(qc_old)
+    qc.update(known)
+    working = (len(known) * 2 >= len(sids)) if sids else bool(qc_old)
+    seen = {b["sid"] for b in out.values()}
+    drop = []
+    for name, b in out.items():
+        if b["rt"] == "ОФЗ":
+            continue
+        if b.get("q") or (working and qc.get(b["sid"], 1) == 1):
+            drop.append(name)
+    unknown = sum(1 for b in out.values() if b["rt"] != "ОФЗ" and b["sid"] not in qc)
+    for name in drop:
+        del out[name]
+    state = "unknown" if not working else ("ok" if not unknown else "partial")
+    keep = {k: v for k, v in qc.items() if k in seen}
+    return keep, state, len(drop), unknown
+
+
 def is_qual(s):
     """Признак «только для квалифицированных инвесторов», если биржа его отдаёт."""
     for k, v in s.items():
@@ -159,6 +205,7 @@ def convert(s, m, is_ofz, ratings, today):
     offer = pdate(s.get("OFFERDATE")) or pdate(s.get("BUYBACKDATE"))
     bond = {
         "name": name,
+        "sid": secid,
         "mat": mat.isoformat() + "T00:00:00",
         "y": y or 0,
         "p": round(price, 3),
@@ -248,6 +295,9 @@ def main():
             else:
                 skipped[why] = skipped.get(why, 0) + 1
 
+    qc, qstate, qdrop, qunk = apply_qual(out, old.get("qc") if isinstance(old.get("qc"), dict) else {})
+    print(f"Квалифицированные: убрано {qdrop}, статус не определён у {qunk}, проверка: {qstate}"
+          + (" (биржа не отдаёт признак в описании выпуска: сомнительные выпуски скрывайте вручную)" if qstate == "unknown" else ""))
     print(f"Облигаций в data.json: {len(out)}; без рейтинга: {len(unrated)}; для квалифицированных: {sum(1 for b in out.values() if b.get('q'))}")
     print("Пропущено:", json.dumps(skipped, ensure_ascii=False))
     if unrated:
@@ -258,6 +308,8 @@ def main():
     msk = datetime.now(timezone(timedelta(hours=3)))
     data = {
         "at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "qual": qstate,
+        "qc": qc,
         "f": "Московская биржа (ISS), " + msk.strftime("%d.%m.%Y %H:%M") + " МСК",
         "b": sorted(out.values(), key=lambda b: b["name"]),
     }
