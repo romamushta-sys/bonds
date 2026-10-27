@@ -130,13 +130,15 @@ def match(c, b, today):
         return False
     if b.get("pk") and not c.get("pk"):
         return False
-    if b.get("q") and not c.get("ql"):
+    if b.get("q"):
         return False
     return True
 
 
 def extras(payload, bonds, state, today):
     """Новые выпуски по сохранённым поискам и сработавшие оповещения. Меняет state."""
+    blk = payload.get("blk") or {}
+    bonds = [b for b in bonds if b["name"] not in blk]
     lines = []
     st_s, st_a = state.setdefault("searches", {}), state.setdefault("alerts", {})
     for c in payload.get("searches", []) or []:
