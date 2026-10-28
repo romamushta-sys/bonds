@@ -259,6 +259,23 @@ def update_history(out, day, keep=250):
     print(f"history.json: {len(h['d'])} дн., {len(h['p'])} выпусков")
 
 
+def load_block():
+    """Постоянный список исключений из blocklist.json: имена целиком или с * в конце (по началу названия)."""
+    names, prefixes = set(), []
+    bp = ROOT / "blocklist.json"
+    if bp.exists():
+        try:
+            for n in json.loads(bp.read_text(encoding="utf-8")).get("names", []):
+                n = str(n).strip().lower()
+                if n.endswith("*"):
+                    prefixes.append(n[:-1])
+                elif n:
+                    names.add(n)
+        except ValueError:
+            print("blocklist.json не читается: проверьте формат JSON")
+    return names, tuple(prefixes)
+
+
 def main():
     today = date.today()
     old = {}
@@ -295,6 +312,12 @@ def main():
             else:
                 skipped[why] = skipped.get(why, 0) + 1
 
+    bn, bp = load_block()
+    blocked = [k for k in list(out) if k.lower() in bn or (bp and k.lower().startswith(bp))]
+    for k in blocked:
+        del out[k]
+    if blocked:
+        print(f"По blocklist.json исключено выпусков: {len(blocked)} ({', '.join(blocked[:10])})")
     qc, qstate, qdrop, qunk = apply_qual(out, old.get("qc") if isinstance(old.get("qc"), dict) else {})
     print(f"Квалифицированные: убрано {qdrop}, статус не определён у {qunk}, проверка: {qstate}"
           + (" (биржа не отдаёт признак в описании выпуска: сомнительные выпуски скрывайте вручную)" if qstate == "unknown" else ""))
