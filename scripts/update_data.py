@@ -109,6 +109,9 @@ def ytm(price, face, coupon, freq, nxt, mat, nkd, today):
         return None
     dirty = price * face / 100.0 + (nkd or 0)
     flows, k, d = [], 0, nxt
+    while d < today and k < 400:  # устаревшая дата купона: переходим к ближайшему будущему
+        k += 1
+        d = addm(nxt, (12 // freq) * k)
     while d <= mat:
         flows.append((d, coupon))
         k += 1
@@ -175,6 +178,26 @@ def is_qual(s):
         if "QUAL" in k.upper() and str(v).strip().lower() in ("1", "true", "y", "yes", "да"):
             return True
     return "квалиф" in " ".join(str(s.get(k) or "") for k in ("REMARKS", "SECNAME")).lower()
+
+
+def yield_check(out, today):
+    """Сверка: своя доходность по денежным потокам против доходности биржи (без выпусков с офертой, у них биржа считает до оферты)."""
+    diffs = []
+    for b in out.values():
+        if b["pk"] or not b["y"] or b.get("of"):
+            continue
+        own = ytm(b["p"], 1000, b["c"], b["f"], pdate(b["nx"]), pdate(b["mat"]), b["nkd"], today)
+        if own is not None:
+            diffs.append((own - b["y"], b["name"], own, b["y"]))
+    if not diffs:
+        return
+    diffs.sort()
+    med = diffs[len(diffs) // 2][0]
+    big = [d for d in diffs if abs(d[0]) > 1]
+    print(f"Сверка доходности по {len(diffs)} выпускам: медианное расхождение {med:+.2f} п.п., больше 1 п.п. у {len(big)}")
+    worst = sorted(big, key=lambda d: -abs(d[0]))[:5]
+    if worst:
+        print("Наибольшие расхождения (своя / биржа): " + "; ".join(f"{n} {o:.1f} / {y:.1f}" for _, n, o, y in worst))
 
 
 def convert(s, m, is_ofz, ratings, today):
@@ -321,6 +344,11 @@ def main():
     qc, qstate, qdrop, qunk = apply_qual(out, old.get("qc") if isinstance(old.get("qc"), dict) else {})
     print(f"Квалифицированные: убрано {qdrop}, статус не определён у {qunk}, проверка: {qstate}"
           + (" (биржа не отдаёт признак в описании выпуска: сомнительные выпуски скрывайте вручную)" if qstate == "unknown" else ""))
+    universe = len(out) + qdrop + len(blocked)
+    old_universe = int(old.get("universe") or len(old.get("b", [])) or 0)
+    if old_universe >= 200 and universe < 0.7 * old_universe:
+        raise SystemExit(f"Выпусков стало заметно меньше ({universe} против {old_universe}): данные не перезаписываю, проверьте ответ биржи и формат.")
+    yield_check(out, today)
     print(f"Облигаций в data.json: {len(out)}; без рейтинга: {len(unrated)}; для квалифицированных: {sum(1 for b in out.values() if b.get('q'))}")
     print("Пропущено:", json.dumps(skipped, ensure_ascii=False))
     if unrated:
@@ -331,6 +359,7 @@ def main():
     msk = datetime.now(timezone(timedelta(hours=3)))
     data = {
         "at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "universe": universe,
         "qual": qstate,
         "qc": qc,
         "f": "Московская биржа (ISS), " + msk.strftime("%d.%m.%Y %H:%M") + " МСК",

@@ -41,7 +41,26 @@ def load_plans(text):
     return []
 
 
-def compose(plans, bonds, today):
+def stress(names, hist):
+    """Цена за 5 наблюдений упала на 3 п.п. и больше относительно медианы рынка (как в приложении)."""
+    d, p = (hist or {}).get("d", []), (hist or {}).get("p", {})
+    n = len(d)
+    if n < 6:
+        return []
+    i1, i0 = n - 1, n - 6
+    ch = sorted(v[i1] - v[i0] for v in p.values() if len(v) > i1 and v[i1] is not None and v[i0] is not None)
+    med = ch[len(ch) // 2] if ch else 0
+    out = []
+    for nm in names:
+        a = p.get(nm)
+        if a and len(a) > i1 and a[i1] is not None and a[i0] is not None:
+            dd = a[i1] - a[i0]
+            if dd - med <= -3 and dd <= -2:
+                out.append(f"{nm}: цена за 5 наблюдений {dd:+.1f} п.п. при медиане рынка {med:+.1f} п.п.")
+    return out
+
+
+def compose(plans, bonds, today, hist=None):
     held = {}
     for p in plans:
         for x in p.get("items", []):
@@ -76,7 +95,11 @@ def compose(plans, bonds, today):
         dp = b["p"] - x["p"]
         if abs(dp) >= 2:
             moves.append(f"{n}: цена {b['p']:.2f}% ({dp:+.2f} п.п. к цене в плане)")
+    sig = stress(sorted(held), hist)
     lines = []
+    if sig:
+        lines.append("Цена падает заметно быстрее рынка (иногда это предвестник плохих новостей):")
+        lines += sig
     if pay:
         lines.append("Выплаты в ближайшие дни:")
         lines += [f"{d.strftime('%d.%m')} {t}" for d, t in sorted(pay)]
@@ -181,7 +204,17 @@ def main():
     plans = load_plans(raw)
     bonds = json.loads((ROOT / "data.json").read_text(encoding="utf-8")).get("b", [])
     today = date.today()
-    text = compose(plans, bonds, today)
+    dj = json.loads((ROOT / "data.json").read_text(encoding="utf-8"))
+    hp = ROOT / "history.json"
+    hist = json.loads(hp.read_text(encoding="utf-8")) if hp.exists() else None
+    text = compose(plans, bonds, today, hist)
+    try:
+        age = (datetime.now(timezone.utc) - datetime.fromisoformat(dj["at"].replace("Z", "+00:00"))).total_seconds() / 86400
+    except (KeyError, ValueError):
+        age = 0
+    if age > 3.2:
+        warn = f"Данные не обновлялись {int(age)} дн.: проверьте вкладку Actions на GitHub."
+        text = (text + "\n\n" if text else f"Дайджест по облигациям на {today.strftime('%d.%m.%Y')}\n\n") + warn
     sp = ROOT / "state.json"
     try:
         state = json.loads(sp.read_text(encoding="utf-8")) if sp.exists() else {}
