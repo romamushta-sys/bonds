@@ -17,6 +17,7 @@ import sys
 import time
 import urllib.parse
 import urllib.request
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -219,13 +220,13 @@ def convert(s, m, is_ofz, ratings, today):
         return None, "нет данных (дата, купон или цена)"
     if fl != "ПК" and coupon <= 0:
         return None, "нулевой купон"
-    y = first(m.get("YIELD"), m.get("YIELDATWAP"))
+    y = first(m.get("YIELD"), m.get("YIELDATWAP"), s.get("YIELDATPREVWAPRICE"))
     if fl != "ПК" and not y:
         y = ytm(price, face, coupon, f, nx, mat, nkd, today)
     if fl != "ПК" and not (y and y > 0):
         return None, "нет доходности"
     dur, val = num(m.get("DURATION")), num(m.get("VALTODAY"))
-    offer = pdate(s.get("OFFERDATE")) or pdate(s.get("BUYBACKDATE"))
+    offer = pdate(s.get("OFFERDATE")) or pdate(s.get("BUYBACKDATE")) or pdate(s.get("PUTOPTIONDATE"))
     bond = {
         "name": name,
         "sid": secid,
@@ -321,6 +322,10 @@ def main():
         sec, md = fetch_board(board)
         print(f"{board}: получено {len(sec)} выпусков")
         print("Колонки securities:", ", ".join(next(iter(sec.values()))) if sec else "-")
+        for col in ("BONDTYPE", "BONDSUBTYPE", "COUPON_DETAILS"):
+            if sec and col in next(iter(sec.values())):
+                cnt = Counter(str(r.get(col))[:45] for r in sec.values())
+                print(f"{board} {col}: " + "; ".join(f"{k} ({v})" for k, v in cnt.most_common(8)))
         if not sec:
             raise SystemExit(f"Пустой ответ по площадке {board}: данные не перезаписываю")
         missing = [c for c in NEED if c not in next(iter(sec.values()))]
