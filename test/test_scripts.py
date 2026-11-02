@@ -9,7 +9,14 @@ import update_data as u  # noqa: E402
 import digest as dg  # noqa: E402
 
 SC = ["SECID", "BOARDID", "SHORTNAME", "MATDATE", "COUPONVALUE", "NEXTCOUPON", "ACCRUEDINT", "COUPONPERIOD", "FACEVALUE", "FACEUNIT", "PREVWAPRICE", "OFFERDATE", "BUYBACKDATE"]
+SC += ["BONDTYPE", "COUPON_DETAILS", "COUPONPERCENT", "CALLOPTIONDATE", "PUTOPTIONDATE", "YIELDATPREVWAPRICE"]
 MC = ["SECID", "LAST", "WAPRICE", "YIELD", "DURATION", "VALTODAY"]
+FIXED = ["Облигация с фиксированным (известным) купоном", "Фиксированный с известными купонами", None, None, None, None]
+TYPES = {"Структ": ["Структурная облигация", "None"], "Амортиз": ["Амортизируемая облигация", "None"], "Валют": ["Валютная облигация", "None"], "Индекс": ["Линкер/облигация с индексируемым номиналом", "ИПЦ"], "Неизв": ["Облигация с фиксированным (неизвестным) купон", "Фиксированный с неизвестными купонами"], "ПлавКС": ["Облигация с плавающим купоном", "Ключевая ставка", 17.0, None, None, None], "ПлавЗагадка": ["Облигация с плавающим купоном", "None", 17.0, None, None, None]}
+
+def tail(name):
+    t = TYPES.get(name.split()[0])
+    return FIXED if t is None else (t + [None] * (6 - len(t)))
 NAMES = ["ИнвОбл06", "Серия А1", "Серия А2", "Серия Б1", "Другая"]
 FUT = lambda days: (date.today() + timedelta(days=days)).isoformat()  # noqa: E731
 
@@ -28,10 +35,10 @@ class Mock(http.server.BaseHTTPRequestHandler):
                 rows = [["ISQUALIFIEDINVESTORS", "Бумаги для квалифицированных инвесторов", "1" if n in (2, 3) else "0"]]
             return self._send({"description": {"columns": ["name", "title", "value"], "data": rows}})
         if "TQOB" in self.path:
-            sec = [["SU26250RMFS9", "TQOB", "ОФЗ 26250", FUT(3000), 59.84, FUT(60), 39.5, 182, 1000, "SUR", 79.69, None, None]]
-            md = [["SU26250RMFS9", 79.7, 79.6, 16.7, 2000, 640e6]]
+            sec = [["SU26250RMFS9", "TQOB", "ОФЗ 26250", FUT(3000), 59.84, FUT(60), 39.5, 182, 1000, "SUR", 79.69, None, None] + FIXED, ["SU29999RMFS1", "TQOB", "ОФЗ 29999", FUT(900), 0, FUT(20), 3.0, 91, 1000, "SUR", 99.0, None, None, "Облигация с плавающим купоном", "Ставка RUONIA", 15.0, None, None, None], ["SU29998RMFS2", "TQOB", "ОФЗ 29998", FUT(900), 0, FUT(20), 3.0, 91, 1000, "SUR", 99.0, None, None, "Облигация с плавающим купоном", "Ставка RUONIA", 15.0, None, None, None]]
+            md = [["SU26250RMFS9", 79.7, 79.6, 16.7, 2000, 640e6], ["SU29999RMFS1", 99, 99, 15, 100, 1e6], ["SU29998RMFS2", 99, 99, 15, 100, 1e6]]
         else:
-            sec = [[f"RU000A10XX{i:02d}", "TQCB", n, FUT(1200), 30.0, FUT(20), 12.0, 30, 1000, "SUR", 97.5, None, None] for i, n in enumerate(Mock.corp, 1)]
+            sec = [[f"RU000A10XX{i:02d}", "TQCB", n, FUT(1200), 30.0, FUT(20), 12.0, 30, 1000, "SUR", 97.5, None, None] + tail(n) for i, n in enumerate(Mock.corp, 1)]
             md = [[c[0], 97.6, 97.5, None, 900, 5e6] for c in sec]
         self._send({"securities": {"columns": SC, "data": sec}, "marketdata": {"columns": MC, "data": md}})
 
@@ -94,11 +101,26 @@ class Scripts(unittest.TestCase):
             r, d3 = self.run_update(tmp, block=["ИнвОбл*"])
             self.assertNotIn("ИнвОбл06", [b["name"] for b in d3["b"]])
 
+    def test_bond_types_floaters_and_spread(self):
+        with tempfile.TemporaryDirectory() as td:
+            names = ["Обычная", "Структ 1", "Амортиз 1", "Валют 1", "Индекс 1", "Неизв 1", "ПлавКС 1", "ПлавЗагадка 1"]
+            r, d = self.run_update(Path(td), corp=names)
+            got = {b["name"]: b for b in d["b"]}
+            for dropped in ("Структ 1", "Амортиз 1", "Валют 1", "Индекс 1", "Неизв 1", "ПлавЗагадка 1"):
+                self.assertNotIn(dropped, got, dropped)
+            self.assertIn("Обычная", got)
+            self.assertFalse(got["Обычная"]["pk"])
+            self.assertTrue(got["ПлавКС 1"]["pk"], "плавающий по ключевой ставке должен стать ПК")
+            self.assertEqual(d["kr0"], 15.0)
+            self.assertAlmostEqual(got["ПлавКС 1"]["spr"], 2.0)   # 17% купон при ставке 15% -> спред 2 п.п.
+            self.assertAlmostEqual(got["ОФЗ 29999"]["spr"], 0.0)
+            self.assertIn("структурная", r.stdout)
+
     def test_unknown_field_keeps_bonds_and_flags_state(self):
         with tempfile.TemporaryDirectory() as td:
             r, d = self.run_update(Path(td), mode="nofield")
             self.assertEqual(d["qual"], "unknown")
-            self.assertEqual(len(d["b"]), 6)
+            self.assertEqual(len(d["b"]), 8)
 
     def test_shrink_guard_keeps_old_data(self):
         with tempfile.TemporaryDirectory() as td:

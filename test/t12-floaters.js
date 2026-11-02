@@ -1,0 +1,30 @@
+// © 2026 Мушта Роман Александрович. Плавающие облигации: спред к ключевой ставке.
+const fs=require('fs'),path=require('path');const D={names:[],sheets:{}};
+const seed=JSON.parse(fs.readFileSync(path.join(__dirname,'fixture.json'),'utf8'));
+const soon=n=>new Date(Date.now()+n*864e5).toISOString().slice(0,10)+'T00:00:00';
+seed.at=new Date().toISOString();seed.kr0=15.4;seed.qual='ok';
+seed.b.push({name:'КорпПК-1',sid:'X1',mat:soon(900),y:19,p:98,rt:'AA',vol:50,c:0,f:4,nkd:5,dur:2,nx:soon(20),fl:'ПК',of:'',pk:true,spr:2.5},{name:'ОФЗ ПК-Т',sid:'X2',mat:soon(900),y:15,p:99,rt:'ОФЗ',vol:50,c:0,f:4,nkd:3,dur:1,nx:soon(20),fl:'ПК',of:'',pk:true,spr:0});
+const html=fs.readFileSync(path.join(__dirname,'..','index.html'),'utf8');
+const js=html.split('<script>')[1].split('</script>')[0].replace(/const EMB="[^"]*"/,'const EMB="x"');
+const defs={amt:'1000000',n:'10',h:'5',s:'yield',u:'all',vol:'100',cap:'20',kr:'14',fq:'0',tm:'i',oth:'0',mq:'',ms:'y',fee:'0.1',pdm:'base',rec:'30',mr:'',mf:'0',krp:''};
+const els={};const mk=id=>els[id]||(els[id]={id,value:defs[id]??'',checked:false,hidden:true,innerHTML:'',textContent:'',placeholder:'',dataset:{},scrollTop:0,classList:{toggle(){},add(){}},addEventListener(){},focus(){},click(){}});
+global.document={title:'',body:{dataset:{}},documentElement:{setAttribute(){},removeAttribute(){}},addEventListener(){},querySelector:s=>s=='[name=r]:checked'?{value:'3'}:mk(s.replace(/^#/,'')),createElement:()=>({click(){}})};
+global.URL={createObjectURL:()=>'blob:x'};global.Blob=class{};global.localStorage={_:{},getItem(k){return this._[k]??null},setItem(k,v){this._[k]=v},removeItem(k){delete this._[k]}};
+global.fetch=async u=>String(u).includes('history')||String(u).includes('blocklist')?{ok:false}:{ok:true,json:async()=>seed};global.XLSX={read:()=>({SheetNames:[],Sheets:{}}),utils:{sheet_to_json:ws=>ws}};global.FileReader=function(){};
+const A=new Function('els','mk',js+`;return {build,savePlan,applyKey,events,pfData,krAt,mine,PLANget:()=>PLAN,BONDSget:()=>BONDS}`)(els,mk);
+const ok=(c,m)=>console.log((c?'PASS':'FAIL'),m);const near=(a,b,t)=>Math.abs(a-b)<=t;
+(async()=>{await new Promise(r=>setTimeout(r,80));
+ok(els['kr'].value=='15.4','policy-rate field is calibrated from the data: '+els['kr'].value);
+els['pk'].checked=true;A.applyKey();const f=A.BONDSget().find(b=>b.name=='КорпПК-1'),o=A.BONDSget().find(b=>b.name=='ОФЗ ПК-Т');
+ok(near(f.c,10*(15.4+2.5)/4,1e-9),'corporate floater coupon = (rate + spread) / 4 = '+f.c.toFixed(2)+' per bond');ok(near(o.c,10*15.4/4,1e-9),'OFZ floater coupon = rate / 4 = '+o.c.toFixed(2));
+els['kr'].value='10';A.applyKey();ok(near(f.c,10*(10+2.5)/4,1e-9),'lower rate scenario lowers the floater coupon: '+f.c.toFixed(2));
+els['kr'].value='1';const g={...f,spr:-3};A.BONDSget().push(g);A.applyKey();ok(g.c==0,'coupon never goes below zero');A.BONDSget().pop();
+els['kr'].value='15.4';els['krp'].value='2027-01:9';const ev=A.events([{b:{...f,mat:new Date(Date.now()+900*864e5),nx:new Date(Date.now()+20*864e5)},q:2}]);
+const cps=ev.filter(e=>e.cp>0);const first=cps[0],last=cps[cps.length-1];ok(near(first.cp,2*10*(15.4+2.5)/4,1e-6)&&near(last.cp,2*10*(9+2.5)/4,1e-6),'events follow the rate path: first '+first.cp.toFixed(1)+' then '+last.cp.toFixed(1));
+els['krp'].value='';els['s'].value='yield';els['u'].value='corp';A.build();A.savePlan();const it=A.PLANget().items;const pkItem=it.find(x=>x.n=='КорпПК-1');
+console.log('  floater in portfolio:',!!pkItem);
+if(!pkItem){const P=A.PLANget();P.items.push({n:f.name,mat:f.mat.toISOString().slice(0,10),nx:f.nx.toISOString().slice(0,10),p:f.p,y:f.y,c:f.c,f:f.f,nkd:f.nkd,rt:f.rt,pk:1,spr:f.spr,q:10,got:10})}
+const x=A.PLANget().items.find(z=>z.n=='КорпПК-1');ok(x&&x.pk&&x.spr===2.5,'plan item stores the floater flag and spread');
+const R=A.pfData(A.PLANget().items);const fut=R.find(r=>r.fut);ok(fut&&isFinite(fut.fact)&&!R.some(r=>isNaN(r.plan)),'plan/fact chart handles floaters without NaN');
+ok(/Включить плавающие облигации \(ПК\)/.test(html),'checkbox label updated');
+})().catch(e=>console.log('ERR',e.stack));
