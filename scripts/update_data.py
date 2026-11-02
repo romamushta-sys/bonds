@@ -208,6 +208,16 @@ def convert(s, m, is_ofz, ratings, today):
     fl = "ПК" if re.match(r"^SU29\d{3}", secid) else "ИН" if re.match(r"^SU52\d{3}", secid) else "АД" if re.match(r"^SU46\d{3}", secid) else ""
     if fl in ("ИН", "АД"):
         return None, "индекс/амортизация"
+    bt, cd = str(s.get("BONDTYPE") or "").lower(), str(s.get("COUPON_DETAILS") or "").lower()
+    both = bt + " " + cd
+    for key, why in (("структур", "структурная"), ("амортиз", "амортизируемая"), ("валютн", "валютная"), ("линкер", "индексируемая"), ("индексир", "индексируемая"), ("ипц", "индексируемая"), ("неизвестн", "купоны неизвестны")):
+        if key in both:
+            return None, why
+    linked = "ключевая ставка" in cd or "ruonia" in cd
+    if "плавающ" in bt and not linked:
+        return None, "плавающий по неизвестной формуле"
+    if linked:
+        fl = "ПК"
     face = num(s.get("FACEVALUE"))
     if face is None or abs(face - 1000) > 0.01 or s.get("FACEUNIT") not in (None, "SUR", "RUB"):
         return None, "номинал не 1000 ₽"
@@ -226,7 +236,7 @@ def convert(s, m, is_ofz, ratings, today):
     if fl != "ПК" and not (y and y > 0):
         return None, "нет доходности"
     dur, val = num(m.get("DURATION")), num(m.get("VALTODAY"))
-    offer = pdate(s.get("OFFERDATE")) or pdate(s.get("BUYBACKDATE")) or pdate(s.get("PUTOPTIONDATE"))
+    offer = pdate(s.get("OFFERDATE")) or pdate(s.get("BUYBACKDATE")) or pdate(s.get("PUTOPTIONDATE")) or pdate(s.get("CALLOPTIONDATE"))
     bond = {
         "name": name,
         "sid": secid,
@@ -244,6 +254,8 @@ def convert(s, m, is_ofz, ratings, today):
         "of": offer.strftime("%d.%m.%Y") if offer else "",
         "pk": fl == "ПК",
     }
+    if fl == "ПК":
+        bond["cpp"] = num(s.get("COUPONPERCENT"))
     if is_qual(s):
         bond["q"] = 1
     return bond, None
@@ -340,6 +352,13 @@ def main():
             else:
                 skipped[why] = skipped.get(why, 0) + 1
 
+    rr = sorted(b["cpp"] for b in out.values() if b["pk"] and b["rt"] == "ОФЗ" and b.get("cpp"))
+    kr0 = round(rr[len(rr) // 2], 2) if rr else None
+    for b in out.values():
+        if b["pk"]:
+            cpp = b.pop("cpp", None)
+            b["spr"] = round(cpp - kr0, 2) if (cpp and kr0) else 0
+    print("Текущая ставка по купонам плавающих ОФЗ (оценка ключевой): " + (f"{kr0}%" if kr0 else "не определена") + "; плавающих выпусков: " + str(sum(1 for b in out.values() if b["pk"])))
     bn, bp = load_block()
     blocked = [k for k in list(out) if k.lower() in bn or (bp and k.lower().startswith(bp))]
     for k in blocked:
@@ -365,6 +384,7 @@ def main():
     data = {
         "at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "universe": universe,
+        "kr0": kr0,
         "qual": qstate,
         "qc": qc,
         "f": "Московская биржа (ISS), " + msk.strftime("%d.%m.%Y %H:%M") + " МСК",
