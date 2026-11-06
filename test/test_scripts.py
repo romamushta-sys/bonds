@@ -21,10 +21,20 @@ NAMES = ["ИнвОбл06", "Серия А1", "Серия А2", "Серия Б1",
 FUT = lambda days: (date.today() + timedelta(days=days)).isoformat()  # noqa: E731
 
 
+YLD = {"Расх": 5.0}
+
+
 class Mock(http.server.BaseHTTPRequestHandler):
-    mode, corp, reqs = "ok", NAMES, []
+    mode, corp, reqs, ks = "ok", NAMES, [], None  # ks: (дней назад последнее изменение, старая ставка, новая ставка)
 
     def do_GET(self):
+        if "/DailyInfoWebServ/DailyInfo.asmx/KeyRate" in self.path:
+            if Mock.ks is None:
+                self.send_response(404); self.end_headers(); return
+            ago, old, new = Mock.ks
+            d = lambda n: (date.today() - timedelta(days=n)).isoformat() + "T00:00:00+03:00"  # noqa: E731
+            xml = f'<?xml version="1.0"?><KeyRate xmlns="http://web.cbr.ru/"><KR><DT>{d(ago + 300)}</DT><Rate>{old}</Rate></KR><KR><DT>{d(ago)}</DT><Rate>{new}</Rate></KR></KeyRate>'
+            self.send_response(200); self.send_header("Content-Type", "text/xml"); self.end_headers(); self.wfile.write(xml.encode()); return
         if "/iss/securities/" in self.path:
             sid = re.search(r"/securities/(\w+)\.json", self.path).group(1)
             Mock.reqs.append(sid)
@@ -39,7 +49,7 @@ class Mock(http.server.BaseHTTPRequestHandler):
             md = [["SU26250RMFS9", 79.7, 79.6, 16.7, 2000, 640e6], ["SU29999RMFS1", 99, 99, 15, 100, 1e6], ["SU29998RMFS2", 99, 99, 15, 100, 1e6]]
         else:
             sec = [[f"RU000A10XX{i:02d}", "TQCB", n, FUT(1200), 30.0, FUT(20), 12.0, 30, 1000, "SUR", 97.5, None, None] + tail(n) for i, n in enumerate(Mock.corp, 1)]
-            md = [[c[0], 97.6, 97.5, None, 900, 5e6] for c in sec]
+            md = [[c[0], 97.6, 97.5, YLD.get(c[2].split()[0]), 900, 5e6] for c in sec]
         self._send({"securities": {"columns": SC, "data": sec}, "marketdata": {"columns": MC, "data": md}})
 
     def _send(self, o):
@@ -68,7 +78,7 @@ class Scripts(unittest.TestCase):
         (tmp / "ratings.json").write_text("{}", encoding="utf-8")
         if block is not None:
             (tmp / "blocklist.json").write_text(json.dumps({"names": block}, ensure_ascii=False), encoding="utf-8")
-        env = {**os.environ, "ISS_BASE": f"http://127.0.0.1:{self.port}", "MIN_BONDS": min_bonds}
+        env = {**os.environ, "ISS_BASE": f"http://127.0.0.1:{self.port}", "CBR_BASE": f"http://127.0.0.1:{self.port}", "MIN_BONDS": min_bonds}
         r = subprocess.run([sys.executable, "scripts/update_data.py"], cwd=tmp, env=env, capture_output=True, text=True)
         d = json.loads((tmp / "data.json").read_text(encoding="utf-8")) if (tmp / "data.json").exists() else None
         return r, d
@@ -101,7 +111,8 @@ class Scripts(unittest.TestCase):
             r, d3 = self.run_update(tmp, block=["ИнвОбл*"])
             self.assertNotIn("ИнвОбл06", [b["name"] for b in d3["b"]])
 
-    def test_bond_types_floaters_and_spread(self):
+    def test_bond_types_and_dropped_structures(self):
+        Mock.ks = (100, 17.0, 14.0)
         with tempfile.TemporaryDirectory() as td:
             names = ["Обычная", "Структ 1", "Амортиз 1", "Валют 1", "Индекс 1", "Неизв 1", "ПлавКС 1", "ПлавЗагадка 1"]
             r, d = self.run_update(Path(td), corp=names)
@@ -111,10 +122,48 @@ class Scripts(unittest.TestCase):
             self.assertIn("Обычная", got)
             self.assertFalse(got["Обычная"]["pk"])
             self.assertTrue(got["ПлавКС 1"]["pk"], "плавающий по ключевой ставке должен стать ПК")
-            self.assertEqual(d["kr0"], 15.0)
-            self.assertAlmostEqual(got["ПлавКС 1"]["spr"], 2.0)   # 17% купон при ставке 15% -> спред 2 п.п.
-            self.assertAlmostEqual(got["ОФЗ 29999"]["spr"], 0.0)
             self.assertIn("структурная", r.stdout)
+
+    def test_floater_spread_uses_key_rate_at_coupon_start(self):
+        # ставка снижена 100 дней назад: период текущего купона (30 дней) начался уже при новой ставке 14%
+        Mock.ks = (100, 17.0, 14.0)
+        with tempfile.TemporaryDirectory() as td:
+            r, d = self.run_update(Path(td), corp=["ПлавКС 1"])
+            got = {b["name"]: b for b in d["b"]}
+            self.assertEqual(d["kr0"], 14.0)
+            self.assertAlmostEqual(got["ПлавКС 1"]["spr"], 3.0)    # купон 17% при ставке 14%
+            self.assertAlmostEqual(got["ОФЗ 29999"]["spr"], 1.0)   # купон 15% при ставке 14%
+            self.assertIn("источник: сайт ЦБ", r.stdout)
+        # ставка снижена 5 дней назад, а период купона начался 10 дней назад: купон 17% зафиксирован при прежней ставке 17%
+        Mock.ks = (5, 17.0, 14.0)
+        with tempfile.TemporaryDirectory() as td:
+            r, d = self.run_update(Path(td), corp=["ПлавКС 1"])
+            got = {b["name"]: b for b in d["b"]}
+            self.assertEqual(d["kr0"], 14.0)
+            self.assertAlmostEqual(got["ПлавКС 1"]["spr"], 0.0)
+
+    def test_key_rate_fallback_to_rates_json(self):
+        Mock.ks = None   # сайт ЦБ недоступен (404)
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            (tmp / "rates.json").write_text(json.dumps({"key_rate": 15.0, "as_of": "2000-01-01", "history": []}), encoding="utf-8")
+            r, d = self.run_update(tmp, corp=["ПлавКС 1"])
+            self.assertEqual(d["kr0"], 15.0)
+            self.assertIn("rates.json", r.stdout)
+            self.assertAlmostEqual({b["name"]: b for b in d["b"]}["ПлавКС 1"]["spr"], 2.0)
+        with tempfile.TemporaryDirectory() as td:   # нет ни сайта, ни файла: спред ноль и предупреждение
+            r, d = self.run_update(Path(td), corp=["ПлавКС 1"])
+            self.assertIsNone(d["kr0"])
+            self.assertIn("не определена", r.stdout)
+
+    def test_yield_mismatch_is_flagged(self):
+        Mock.ks = None
+        with tempfile.TemporaryDirectory() as td:
+            r, d = self.run_update(Path(td), corp=["Обычная", "Обычная 2", "Обычная 3", "Расх 1"])
+            got = {b["name"]: b for b in d["b"]}
+            self.assertEqual(got["Расх 1"].get("sus"), 1)
+            self.assertIsNone(got["Обычная"].get("sus"))
+            self.assertIn("сверка", r.stdout)
 
     def test_unknown_field_keeps_bonds_and_flags_state(self):
         with tempfile.TemporaryDirectory() as td:
