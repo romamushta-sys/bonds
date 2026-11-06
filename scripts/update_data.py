@@ -193,9 +193,15 @@ def yield_check(out, today):
     if not diffs:
         return
     diffs.sort()
+    for d, name, own, y in diffs:
+        if abs(d) > 10:
+            out[name]["sus"] = 1
     med = diffs[len(diffs) // 2][0]
     big = [d for d in diffs if abs(d[0]) > 1]
     print(f"Сверка доходности по {len(diffs)} выпускам: медианное расхождение {med:+.2f} п.п., больше 1 п.п. у {len(big)}")
+    nsus = sum(1 for d in diffs if abs(d[0]) > 10)
+    if nsus:
+        print(f"Помечено «сверка» (расхождение больше 10 п.п., в автоподбор не берутся): {nsus}")
     worst = sorted(big, key=lambda d: -abs(d[0]))[:5]
     if worst:
         print("Наибольшие расхождения (своя / биржа): " + "; ".join(f"{n} {o:.1f} / {y:.1f}" for _, n, o, y in worst))
@@ -295,6 +301,55 @@ def update_history(out, day, keep=250):
     print(f"history.json: {len(h['d'])} дн., {len(h['p'])} выпусков")
 
 
+CBR = os.environ.get("CBR_BASE", "https://www.cbr.ru")
+
+
+def key_rate_history(today):
+    """Ключевая ставка Банка России: список (дата ISO, ставка). Сначала сайт ЦБ, затем rates.json."""
+    hist, src = [], ""
+    try:
+        import xml.etree.ElementTree as ET
+        url = f"{CBR}/DailyInfoWebServ/DailyInfo.asmx/KeyRate?fromDate={(today - timedelta(days=900)).isoformat()}&ToDate={today.isoformat()}"
+        with urllib.request.urlopen(urllib.request.Request(url, headers={"User-Agent": "bond-constructor/1.0"}), timeout=30) as r:
+            root = ET.fromstring(r.read())
+        for el in root.iter():
+            if el.tag.split("}")[-1] == "KR":
+                dt = rt = None
+                for c in el:
+                    t = c.tag.split("}")[-1]
+                    if t == "DT" and c.text:
+                        dt = c.text[:10]
+                    elif t == "Rate" and c.text:
+                        rt = float(c.text.replace(",", "."))
+                if dt and rt is not None:
+                    hist.append((dt, rt))
+        src = "сайт ЦБ"
+    except Exception as e:  # noqa: BLE001
+        print("Ставка с сайта ЦБ не получена:", str(e)[:100])
+    rp = ROOT / "rates.json"
+    if rp.exists():
+        try:
+            j = json.loads(rp.read_text(encoding="utf-8"))
+            extra = [(str(d)[:10], float(v)) for d, v in j.get("history", [])]
+            if j.get("key_rate") is not None:
+                extra.append((str(j.get("as_of", "2000-01-01"))[:10], float(j["key_rate"])))
+            if not hist:
+                hist, src = extra, "rates.json"
+        except (ValueError, TypeError):
+            print("rates.json не читается: проверьте формат JSON")
+    return sorted(set(hist)), src
+
+
+def kr_at(hist, d):
+    """Ставка, действовавшая на дату d (ISO-строка или date); None, если данных нет."""
+    d = d.isoformat() if hasattr(d, "isoformat") else str(d)[:10]
+    cur = None
+    for dt, rt in hist:
+        if dt <= d:
+            cur = rt
+    return cur
+
+
 def load_block():
     """Постоянный список исключений из blocklist.json: имена целиком или с * в конце (по началу названия)."""
     names, prefixes = set(), []
@@ -352,13 +407,15 @@ def main():
             else:
                 skipped[why] = skipped.get(why, 0) + 1
 
-    rr = sorted(b["cpp"] for b in out.values() if b["pk"] and b["rt"] == "ОФЗ" and b.get("cpp"))
-    kr0 = round(rr[len(rr) // 2], 2) if rr else None
+    hist, ksrc = key_rate_history(today)
+    kr0 = kr_at(hist, today)
     for b in out.values():
         if b["pk"]:
             cpp = b.pop("cpp", None)
-            b["spr"] = round(cpp - kr0, 2) if (cpp and kr0) else 0
-    print("Текущая ставка по купонам плавающих ОФЗ (оценка ключевой): " + (f"{kr0}%" if kr0 else "не определена") + "; плавающих выпусков: " + str(sum(1 for b in out.values() if b["pk"])))
+            start = pdate(b["nx"]) - timedelta(days=round(365 / b["f"])) if b["f"] else today
+            kr = kr_at(hist, start) or kr0
+            b["spr"] = round(cpp - kr, 2) if (cpp and kr) else 0
+    print("Ключевая ставка: " + (f"{kr0}% (источник: {ksrc})" if kr0 else "не определена: спреды плавающих выпусков приняты равными нулю") + "; плавающих выпусков: " + str(sum(1 for b in out.values() if b["pk"])))
     bn, bp = load_block()
     blocked = [k for k in list(out) if k.lower() in bn or (bp and k.lower().startswith(bp))]
     for k in blocked:
