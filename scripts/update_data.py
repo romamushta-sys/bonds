@@ -409,12 +409,20 @@ def main():
 
     hist, ksrc = key_rate_history(today)
     kr0 = kr_at(hist, today)
+    nohist = 0
     for b in out.values():
         if b["pk"]:
             cpp = b.pop("cpp", None)
             start = pdate(b["nx"]) - timedelta(days=round(365 / b["f"])) if b["f"] else today
-            kr = kr_at(hist, start) or kr0
+            kr = kr_at(hist, start)
+            if kr is None:
+                nohist += 1
+                kr = kr0
             b["spr"] = round(cpp - kr, 2) if (cpp and kr) else 0
+    if nohist:
+        print(f"Внимание: для {nohist} плавающих выпусков в истории ставки нет данных на начало купонного периода, спред посчитан по текущей ставке (дополните history в rates.json)")
+    if ksrc == "rates.json" and hist and (today - date.fromisoformat(hist[-1][0])).days > 75:
+        print(f"Внимание: последняя запись ставки в rates.json от {hist[-1][0]}, проверьте, не менялась ли ставка на очередном заседании ЦБ")
     print("Ключевая ставка: " + (f"{kr0}% (источник: {ksrc})" if kr0 else "не определена: спреды плавающих выпусков приняты равными нулю") + "; плавающих выпусков: " + str(sum(1 for b in out.values() if b["pk"])))
     bn, bp = load_block()
     blocked = [k for k in list(out) if k.lower() in bn or (bp and k.lower().startswith(bp))]
@@ -442,6 +450,7 @@ def main():
         "at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "universe": universe,
         "kr0": kr0,
+        "ksrc": ksrc,
         "qual": qstate,
         "qc": qc,
         "f": "Московская биржа (ISS), " + msk.strftime("%d.%m.%Y %H:%M") + " МСК",
