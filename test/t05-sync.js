@@ -18,36 +18,38 @@ global.URL={createObjectURL:()=>'blob:x'};global.Blob=class{};global.XLSX={read:
 function device(name,pre){const els={};const mk=id=>els[id]||(els[id]={id,value:defs[id]??'',checked:false,innerHTML:'',textContent:'',placeholder:'',dataset:{},scrollTop:0,classList:{toggle(){},add(){}},addEventListener(){},focus(){},click(){}});
 const d={name,els,mk,ls:{_:{},getItem(k){return this._[k]??null},setItem(k,v){this._[k]=v},removeItem(k){delete this._[k]}},doc:null};
 if(pre)Object.assign(d.ls._,pre);d.doc={body:{dataset:{}},documentElement:{setAttribute(){},removeAttribute(){}},querySelector:s=>s=='[name=r]:checked'?{value:'3'}:mk(s.replace(/^#/,'')),createElement:()=>({click(){}})};
-use(d);d.app=new Function('els','mk',js+`;return {build,drawPlan,savePlan,store,syncNow,mergeSnap,snap,decSnap,applySnap,SYget:()=>SY,PLANget:()=>PLAN,ALLget:()=>ALL,CURget:()=>CUR,SRCHget:()=>SRCH,DELget:()=>DEL,BONDSget:()=>BONDS,loadPlans}`)(els,mk);return d}
+DEVS.push(d);use(d);d.app=new Function('els','mk',js+`;return {build,drawPlan,savePlan,store,syncNow,mergeSnap,snap,decSnap,applySnap,SYget:()=>SY,PLANget:()=>PLAN,ALLget:()=>ALL,CURget:()=>CUR,SRCHget:()=>SRCH,DELget:()=>DEL,BONDSget:()=>BONDS,loadPlans}`)(els,mk);return d}
 function use(d){global.document=d.doc;global.localStorage=d.ls}
+const DEVS=[];
+const settleAll=async()=>{await new Promise(r=>setTimeout(r,160));for(let i=0;i<150&&DEVS.some(d=>d.app&&d.app.SYget().busy);i++)await new Promise(r=>setTimeout(r,100));await new Promise(r=>setTimeout(r,60))};
 const ok=(c,m)=>console.log((c?'PASS':'FAIL'),m);const wait=ms=>new Promise(r=>setTimeout(r,ms));
 (async()=>{
 const A=device('laptop');use(A);await wait(60);A.app.SYget().delay=20;A.app.build();A.app.savePlan();
 // 1. enable sync on laptop
-A.mk('ght').value='goodtoken';A.mk('ghp').value='секретная фраза';A.els['ghu'].onclick();await wait(1500);
+A.mk('ght').value='goodtoken';A.mk('ghp').value='секретная фраза';A.els['ghu'].onclick();await settleAll();
 const ids=Object.keys(srv.gists);ok(ids.length==1&&srv.gists[ids[0]].public===false&&srv.gists[ids[0]].files['bond-plans.enc.json'],'encrypted gist created (non-public)');
 const content=srv.gists[ids[0]].files['bond-plans.enc.json'].content;ok(!/ОФЗ|items|Основной/.test(content)&&/"salt"/.test(content),'gist content is ciphertext, no plan names or bond names ('+content.length+' bytes)');
 console.log('  status:',A.els['sym']&&A.els['sym'].textContent);
 // 2. phone, fresh device, same token/phrase
-const B=device('phone');use(B);await wait(60);B.app.SYget().delay=20;B.mk('ght').value='goodtoken';B.mk('ghp').value='секретная фраза';B.els['ghu'].onclick();await wait(1500);
+const B=device('phone');use(B);await wait(60);B.app.SYget().delay=20;B.mk('ght').value='goodtoken';B.mk('ghp').value='секретная фраза';B.els['ghu'].onclick();await settleAll();
 ok(B.app.PLANget()&&B.app.PLANget().items.length==10&&B.app.CURget()=='Основной','phone received the plan without any gist id');
 // 3. change on phone, debounced auto-push, laptop pulls
-B.app.PLANget().items[0].got=7;B.app.store();await wait(1500);use(A);await A.app.syncNow();
+B.app.PLANget().items[0].got=7;B.app.store();await settleAll();use(A);await A.app.syncNow();
 ok(A.app.PLANget().items[0].got==7,'change made on phone appears on laptop after sync');
 // 4. offline edit on both devices, different plans, then merge
-use(A);A.app.PLANget().items[1].got=3;A.app.store();await wait(1500);use(B);await B.app.syncNow();
+use(A);A.app.PLANget().items[1].got=3;A.app.store();await settleAll();use(B);await B.app.syncNow();
 use(B);srv.online=false;B.els['pln']=B.els['pln']||B.mk('pln');B.mk('pln').value='ИИС';B.els['plc'].onclick();await wait(100);B.app.PLANget().trades=[];B.app.store();await wait(200);srv.online=true;
-use(A);A.app.PLANget().items[2].got=5;A.app.store();await wait(1500);
+use(A);A.app.PLANget().items[2].got=5;A.app.store();await settleAll();
 use(B);await B.app.syncNow();use(A);await A.app.syncNow();
 ok(Object.keys(A.app.ALLget()).sort().join()==Object.keys(B.app.ALLget()).sort().join()&&Object.keys(A.app.ALLget()).includes('ИИС')&&Object.keys(A.app.ALLget()).includes('Основной'),'two plans edited on different devices are merged: '+Object.keys(A.app.ALLget()).join(', '));
 const pa=A.app.ALLget()['Основной'].items,pb=B.app.ALLget()['Основной'].items;ok(pa[1].got==3&&pa[2].got==5&&pb[1].got==3&&pb[2].got==5,'edits from both devices kept in the shared plan');
 // 5. delete plan on phone propagates
 use(B);B.app.swPlan&&0;B.app.applySnap({...B.app.snap(),cur:'ИИС'});B.els['rs'].onclick&&0;
 // emulate delete via the same code path as the button: tombstone + delete
-const sn=B.app.snap();delete sn.all['ИИС'];sn.del={...sn.del,'ИИС':Date.now()};B.app.applySnap(sn);B.app.store();await wait(1500);use(A);await A.app.syncNow();
+const sn=B.app.snap();delete sn.all['ИИС'];sn.del={...sn.del,'ИИС':Date.now()};B.app.applySnap(sn);B.app.store();await settleAll();use(A);await A.app.syncNow();
 ok(!Object.keys(A.app.ALLget()).includes('ИИС')&&Object.keys(A.app.ALLget()).includes('Основной'),'deleted plan disappears on the other device (tombstone), not resurrected');
 // 6. wrong phrase
-const C=device('tablet');use(C);await wait(60);C.mk('ght').value='goodtoken';C.mk('ghp').value='другая фраза';C.els['ghu'].onclick();await wait(1500);
+const C=device('tablet');use(C);await wait(60);C.mk('ght').value='goodtoken';C.mk('ghp').value='другая фраза';C.els['ghu'].onclick();await settleAll();
 ok(/Неверная кодовая фраза/.test(C.els['sym'].textContent)&&!C.app.PLANget(),'wrong passphrase: sync stops, local data untouched');
 // 7. bad token
 const E=device('x');use(E);await wait(60);E.mk('ght').value='badtoken';E.mk('ghp').value='x';E.els['ghu'].onclick();await wait(800);ok(/токен не принят/.test(E.els['sym'].textContent),'bad token message');
@@ -70,7 +72,7 @@ setTimeout(async()=>{
 setTimeout(async()=>{
  // stale non-hex id left from the old manual version, and a hex id of a deleted gist
  for(const [label,id] of [['stale text id','Roman'],['deleted gist id','deadbeefdeadbeefdead1']]){
-  const X=device('stale-'+label,{gh:JSON.stringify({t:'goodtoken',p:'секретная фраза',auto:true,id})});use(X);await wait(1500);
+  const X=device('stale-'+label,{gh:JSON.stringify({t:'goodtoken',p:'секретная фраза',auto:true,id})});use(X);await settleAll();
   ok(!!X.app.PLANget()&&/синхронизировано/.test(X.els['sym'].textContent),'recovers from '+label+' ('+id+'): '+X.els['sym'].textContent);
   const g=JSON.parse(X.ls._.gh);ok(/^[0-9a-f]{20,40}$/.test(g.id)&&g.id!=id,'valid gist id stored after recovery: '+g.id);
  }
