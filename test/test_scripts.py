@@ -25,16 +25,26 @@ YLD = {"Расх": 5.0}
 
 
 class Mock(http.server.BaseHTTPRequestHandler):
-    mode, corp, reqs, ks = "ok", NAMES, [], None  # ks: (дней назад последнее изменение, старая ставка, новая ставка)
+    mode, corp, reqs, ks, ksmode, issuers = "ok", NAMES, [], None, "get", None  # ks: (дней назад последнее изменение, старая ставка, новая ставка)
 
     def do_GET(self):
         if "/DailyInfoWebServ/DailyInfo.asmx/KeyRate" in self.path:
-            if Mock.ks is None:
+            if Mock.ks is None or Mock.ksmode != "get":
+                self.send_response(404); self.end_headers(); return
+            self.send_response(200); self.send_header("Content-Type", "text/xml"); self.end_headers(); self.wfile.write(self._xml().encode()); return
+        if "/hd_base/KeyRate/" in self.path:
+            if Mock.ks is None or Mock.ksmode != "html":
                 self.send_response(404); self.end_headers(); return
             ago, old, new = Mock.ks
-            d = lambda n: (date.today() - timedelta(days=n)).isoformat() + "T00:00:00+03:00"  # noqa: E731
-            xml = f'<?xml version="1.0"?><KeyRate xmlns="http://web.cbr.ru/"><KR><DT>{d(ago + 300)}</DT><Rate>{old}</Rate></KR><KR><DT>{d(ago)}</DT><Rate>{new}</Rate></KR></KeyRate>'
-            self.send_response(200); self.send_header("Content-Type", "text/xml"); self.end_headers(); self.wfile.write(xml.encode()); return
+            dd = lambda n: (date.today() - timedelta(days=n)).strftime("%d.%m.%Y")  # noqa: E731
+            html = f"<table><tr><td>{dd(ago)}</td><td>{str(new).replace('.', ',')}</td></tr><tr><td>{dd(ago + 300)}</td><td>{str(old).replace('.', ',')}</td></tr></table>"
+            self.send_response(200); self.send_header("Content-Type", "text/html"); self.end_headers(); self.wfile.write(html.encode()); return
+        if "/iss/securities.json" in self.path:
+            if Mock.issuers is None:
+                self.send_response(404); self.end_headers(); return
+            start = int(re.search(r"start=(\d+)", self.path).group(1))
+            rows = [[sid, "x", inn] for sid, inn in Mock.issuers.items()] if start == 0 else []
+            return self._send({"securities": {"columns": ["secid", "shortname", "emitent_inn"], "data": rows}})
         if "/iss/securities/" in self.path:
             sid = re.search(r"/securities/(\w+)\.json", self.path).group(1)
             Mock.reqs.append(sid)
@@ -51,6 +61,21 @@ class Mock(http.server.BaseHTTPRequestHandler):
             sec = [[f"RU000A10XX{i:02d}", "TQCB", n, FUT(1200), 30.0, FUT(20), 12.0, 30, 1000, "SUR", 97.5, None, None] + tail(n) for i, n in enumerate(Mock.corp, 1)]
             md = [[c[0], 97.6, 97.5, YLD.get(c[2].split()[0]), 900, 5e6] for c in sec]
         self._send({"securities": {"columns": SC, "data": sec}, "marketdata": {"columns": MC, "data": md}})
+
+    def do_POST(self):
+        self.rfile.read(int(self.headers.get("Content-Length", 0)))
+        if "/DailyInfoWebServ/DailyInfo.asmx" in self.path and Mock.ks is not None and Mock.ksmode == "soap":
+            body = f'<soap:Envelope><soap:Body><KeyRateResponse><KeyRateResult><diffgr:diffgram><KeyRate xmlns="">{self._krs()}</KeyRate></diffgr:diffgram></KeyRateResult></KeyRateResponse></soap:Body></soap:Envelope>'
+            self.send_response(200); self.send_header("Content-Type", "text/xml"); self.end_headers(); self.wfile.write(body.encode()); return
+        self.send_response(500); self.end_headers()
+
+    def _krs(self):
+        ago, old, new = Mock.ks
+        d = lambda n: (date.today() - timedelta(days=n)).isoformat() + "T00:00:00+03:00"  # noqa: E731
+        return f"<KR><DT>{d(ago + 300)}</DT><Rate>{old}</Rate></KR><KR><DT>{d(ago)}</DT><Rate>{new}</Rate></KR>"
+
+    def _xml(self):
+        return f'<?xml version="1.0"?><KeyRate xmlns="http://web.cbr.ru/">{self._krs()}</KeyRate>\n<!-- junk after the document element -->'
 
     def _send(self, o):
         self.send_response(200); self.send_header("Content-Type", "application/json"); self.end_headers()
@@ -71,11 +96,11 @@ class Scripts(unittest.TestCase):
     def tearDownClass(cls):
         cls.srv.shutdown()
 
-    def run_update(self, tmp, mode="ok", block=None, corp=None, min_bonds="1"):
+    def run_update(self, tmp, mode="ok", block=None, corp=None, min_bonds="1", ratings=None):
         Mock.mode, Mock.corp = mode, corp or NAMES
         Mock.reqs.clear()
         shutil.copytree(ROOT / "scripts", tmp / "scripts", dirs_exist_ok=True)
-        (tmp / "ratings.json").write_text("{}", encoding="utf-8")
+        (tmp / "ratings.json").write_text(json.dumps(ratings or {}, ensure_ascii=False), encoding="utf-8")
         if block is not None:
             (tmp / "blocklist.json").write_text(json.dumps({"names": block}, ensure_ascii=False), encoding="utf-8")
         env = {**os.environ, "ISS_BASE": f"http://127.0.0.1:{self.port}", "CBR_BASE": f"http://127.0.0.1:{self.port}", "MIN_BONDS": min_bonds}
@@ -155,6 +180,45 @@ class Scripts(unittest.TestCase):
             r, d = self.run_update(Path(td), corp=["ПлавКС 1"])
             self.assertIsNone(d["kr0"])
             self.assertIn("не определена", r.stdout)
+
+    def test_key_rate_other_methods_and_junk_in_xml(self):
+        for mode in ("get", "soap", "html"):
+            Mock.ks, Mock.ksmode = (100, 17.0, 14.0), mode
+            with tempfile.TemporaryDirectory() as td:
+                r, d = self.run_update(Path(td), corp=["ПлавКС 1"])
+                self.assertEqual(d["kr0"], 14.0, mode)
+                self.assertEqual(d["ksrc"].split("(")[0].strip(), "сайт ЦБ", mode)
+        Mock.ksmode = "get"
+        with tempfile.TemporaryDirectory() as td:   # все способы недоступны: подробный диагноз в логе
+            Mock.ks = None
+            r, d = self.run_update(Path(td), corp=["ПлавКС 1"])
+            self.assertIn("способ GET XML: HTTP 404", r.stdout)
+            self.assertIn("способ SOAP: HTTP 500", r.stdout)
+
+    def test_rating_inference_by_issuer(self):
+        Mock.ks = None
+        names = ["Эмит А 1", "Филл 2", "Филл 3", "Эмит А 3", "Эмит Б 1", "Эмит Б 2", "Одиночка 1", "Эмит Б 3"]
+        ratings = {"Эмит А 1": "AA-", "Эмит Б 1": "A", "Эмит Б 2": "BBB"}
+        Mock.issuers = {f"RU000A10XX{i:02d}": ("100" if n.startswith("Эмит А") else "200" if n.startswith("Эмит Б") else "300") for i, n in enumerate(names, 1)}
+        try:
+            with tempfile.TemporaryDirectory() as td:
+                r, d = self.run_update(Path(td), corp=names, ratings=ratings)
+                got = {b["name"]: b for b in d["b"]}
+                self.assertEqual(got["Эмит А 3"]["rt"], "AA-~")          # единственный рейтинг эмитента
+                self.assertEqual(got["Эмит А 3"].get("rti"), 1)
+                self.assertEqual(got["Эмит А 1"]["rt"], "AA-")           # собственный рейтинг не помечается
+                self.assertEqual(got["Эмит Б 3"]["rt"], "—")             # у эмитента два разных рейтинга: не переносим
+                self.assertEqual(got["Одиночка 1"]["rt"], "—")           # рейтинга у эмитента нет
+                self.assertIn("по данным биржи", r.stdout)
+            Mock.issuers = None      # список эмитентов недоступен: группировка по началу названия
+            with tempfile.TemporaryDirectory() as td:
+                r, d = self.run_update(Path(td), corp=["Альфа 1", "Филл 2", "Филл 3", "Альфа 3", "Бета 1"], ratings={"Альфа 1": "A+"})
+                got = {b["name"]: b for b in d["b"]}
+                self.assertEqual(got["Альфа 3"]["rt"], "A+~")
+                self.assertEqual(got["Бета 1"]["rt"], "—")
+                self.assertIn("по названию выпуска", r.stdout)
+        finally:
+            Mock.issuers = None
 
     def test_yield_mismatch_is_flagged(self):
         Mock.ks = None

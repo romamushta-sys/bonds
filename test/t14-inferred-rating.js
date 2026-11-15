@@ -1,0 +1,24 @@
+// © 2026 Мушта Роман Александрович. Оценочный рейтинг (значок ~) должен работать как обычный в отборе и показываться в таблицах.
+const fs=require('fs'),path=require('path');
+const seed=JSON.parse(fs.readFileSync(path.join(__dirname,'fixture.json'),'utf8'));
+const soon=n=>new Date(Date.now()+n*864e5).toISOString().slice(0,10)+'T00:00:00';
+seed.at=new Date().toISOString();seed.qual='ok';
+seed.b.push({name:'ОценкаАА',sid:'T1',mat:soon(800),y:26,p:90,rt:'AA-~',rti:1,vol:5000,c:20,f:12,nkd:3,dur:2,nx:soon(15),fl:'',of:'',pk:false},{name:'ОценкаBB',sid:'T2',mat:soon(800),y:40,p:80,rt:'BB~',rti:1,vol:5000,c:30,f:12,nkd:3,dur:2,nx:soon(15),fl:'',of:'',pk:false});
+const html=fs.readFileSync(path.join(__dirname,'..','index.html'),'utf8');
+const js=html.split('<script>')[1].split('</script>')[0].replace(/const EMB="[^"]*"/,'const EMB="x"');
+const defs={amt:'1000000',n:'10',h:'5',s:'yield',u:'all',vol:'100',cap:'20',kr:'14',fq:'0',tm:'i',oth:'0',mq:'',ms:'y',fee:'0.1',pdm:'base',rec:'30',mr:'',mf:'0'};
+let RISK='2';
+const els={};const mk=id=>els[id]||(els[id]={id,value:defs[id]??'',checked:false,hidden:true,innerHTML:'',textContent:'',placeholder:'',dataset:{},scrollTop:0,classList:{toggle(){},add(){}},addEventListener(){},focus(){},click(){}});
+global.document={title:'',body:{dataset:{}},documentElement:{setAttribute(){},removeAttribute(){}},addEventListener(){},querySelector:s=>s=='[name=r]:checked'?{value:RISK}:mk(s.replace(/^#/,'')),createElement:()=>({click(){}})};
+global.URL={createObjectURL:()=>'blob:x'};global.Blob=class{};global.localStorage={_:{},getItem(k){return this._[k]??null},setItem(k,v){this._[k]=v},removeItem(k){delete this._[k]}};
+global.fetch=async u=>String(u).includes('history')||String(u).includes('blocklist')?{ok:false}:{ok:true,json:async()=>seed};global.XLSX={read:()=>({SheetNames:[],Sheets:{}}),utils:{sheet_to_json:ws=>ws}};global.FileReader=function(){};
+const A=new Function('els','mk',js+`;return {build,mine,rs,LASTget:()=>LAST}`)(els,mk);
+const ok=(c,m)=>console.log((c?'PASS':'FAIL'),m);
+(async()=>{await new Promise(r=>setTimeout(r,80));
+ok(A.rs('AA-~')==2&&A.rs('BB~')==5&&A.rs('A+~')==3,'rating with ~ maps to the same class as without it');
+A.build();const names=A.LASTget().pos.map(x=>x.b.name);
+ok(names.includes('ОценкаАА')&&!names.includes('ОценкаBB'),'low-risk profile takes the AA- estimate and rejects the BB estimate');
+ok(/<span class="chip">AA-~<\/span>/.test(els['out'].innerHTML),'portfolio table shows the estimate marker');
+RISK='5';els['s'].value='yield';A.build();ok(A.LASTget().pos.some(x=>x.b.name=='ОценкаBB'),'high-risk profile can take the BB estimate');
+mk('mq').value='Оценка';A.mine();ok(/AA-~/.test(els['ml'].innerHTML)&&!/data-rt="[^"]*"[^>]*>[^<]*<[^>]*>[^<]*ОценкаАА/.test(els['ml'].innerHTML),'picker lists estimated ratings');
+})().catch(e=>console.log('ERR',e.stack));
