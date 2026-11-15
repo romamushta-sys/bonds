@@ -16,6 +16,7 @@ import re
 import sys
 import time
 import urllib.parse
+import urllib.error
 import urllib.request
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
@@ -75,7 +76,7 @@ def get(url, tries=4, soft=False):
                 return json.load(r)
         except Exception as e:  # noqa: BLE001
             print(f"попытка {i + 1} не удалась: {e}", file=sys.stderr)
-            time.sleep(2 * (i + 1))
+            time.sleep((0.4 if soft else 2) * (i + 1))
     if soft:
         return None
     raise SystemExit("ISS недоступен: " + url)
@@ -304,28 +305,55 @@ def update_history(out, day, keep=250):
 CBR = os.environ.get("CBR_BASE", "https://www.cbr.ru")
 
 
+def parse_key_rates(text):
+    """Достаёт пары (дата, ставка) из XML (в том числе SOAP и «грязного») или из HTML-таблицы сайта ЦБ."""
+    found = []
+    for dt, rt in re.findall(r"<(?:\w+:)?DT>\s*([^<]+?)\s*</(?:\w+:)?DT>\s*<(?:\w+:)?Rate>\s*([^<]+?)\s*</(?:\w+:)?Rate>", text):
+        try:
+            found.append((dt[:10], float(rt.replace(",", "."))))
+        except ValueError:
+            pass
+    if not found:
+        for d, m, y, rt in re.findall(r"(\d{2})\.(\d{2})\.(\d{4})\s*</td>\s*<td[^>]*>\s*([\d]+[.,]?\d*)\s*</td>", text):
+            found.append((f"{y}-{m}-{d}", float(rt.replace(",", "."))))
+    return sorted(set(found))
+
+
+def http_text(url, data=None, headers=None):
+    req = urllib.request.Request(url, data=data, headers={"User-Agent": "Mozilla/5.0 (compatible; bond-constructor/1.0)", **(headers or {})})
+    try:
+        with urllib.request.urlopen(req, timeout=30) as r:
+            return r.status, r.headers.get("Content-Type", ""), r.read().decode("utf-8", "replace")
+    except urllib.error.HTTPError as e:
+        return e.code, e.headers.get("Content-Type", ""), e.read().decode("utf-8", "replace")
+
+
+def fetch_cbr_rates(today):
+    """Три способа получить историю ставки с сайта ЦБ; при неудаче печатает, что именно пришло в ответ."""
+    frm, to = (today - timedelta(days=900)), today
+    soap = (f'<?xml version="1.0" encoding="utf-8"?><soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/"><soap:Body>'
+            f'<KeyRate xmlns="http://web.cbr.ru/"><fromDate>{frm.isoformat()}</fromDate><ToDate>{to.isoformat()}</ToDate></KeyRate></soap:Body></soap:Envelope>')
+    tries = [
+        ("GET XML", lambda: http_text(f"{CBR}/DailyInfoWebServ/DailyInfo.asmx/KeyRate?fromDate={frm.isoformat()}&ToDate={to.isoformat()}")),
+        ("SOAP", lambda: http_text(f"{CBR}/DailyInfoWebServ/DailyInfo.asmx", soap.encode("utf-8"), {"Content-Type": "text/xml; charset=utf-8", "SOAPAction": '"http://web.cbr.ru/KeyRate"'})),
+        ("HTML", lambda: http_text(f"{CBR}/hd_base/KeyRate/?UniDbQuery.Posted=True&UniDbQuery.From={frm.strftime('%d.%m.%Y')}&UniDbQuery.To={to.strftime('%d.%m.%Y')}")),
+    ]
+    for name, call in tries:
+        try:
+            status, ctype, text = call()
+        except Exception as e:  # noqa: BLE001
+            print(f"Ставка ЦБ, способ {name}: ошибка запроса: {str(e)[:100]}")
+            continue
+        found = parse_key_rates(text)
+        if found:
+            return found, f"сайт ЦБ ({name})"
+        print(f"Ставка ЦБ, способ {name}: HTTP {status}, {ctype[:40]}, записей не найдено, начало ответа: {text[:140]!r}")
+    return [], ""
+
+
 def key_rate_history(today):
     """Ключевая ставка Банка России: список (дата ISO, ставка). Сначала сайт ЦБ, затем rates.json."""
-    hist, src = [], ""
-    try:
-        import xml.etree.ElementTree as ET
-        url = f"{CBR}/DailyInfoWebServ/DailyInfo.asmx/KeyRate?fromDate={(today - timedelta(days=900)).isoformat()}&ToDate={today.isoformat()}"
-        with urllib.request.urlopen(urllib.request.Request(url, headers={"User-Agent": "bond-constructor/1.0"}), timeout=30) as r:
-            root = ET.fromstring(r.read())
-        for el in root.iter():
-            if el.tag.split("}")[-1] == "KR":
-                dt = rt = None
-                for c in el:
-                    t = c.tag.split("}")[-1]
-                    if t == "DT" and c.text:
-                        dt = c.text[:10]
-                    elif t == "Rate" and c.text:
-                        rt = float(c.text.replace(",", "."))
-                if dt and rt is not None:
-                    hist.append((dt, rt))
-        src = "сайт ЦБ"
-    except Exception as e:  # noqa: BLE001
-        print("Ставка с сайта ЦБ не получена:", str(e)[:100])
+    hist, src = fetch_cbr_rates(today)
     rp = ROOT / "rates.json"
     if rp.exists():
         try:
@@ -348,6 +376,51 @@ def kr_at(hist, d):
         if dt <= d:
             cur = rt
     return cur
+
+
+def fetch_issuers():
+    """secid -> идентификатор эмитента (ИНН, иначе id) по общему списку облигаций Мосбиржи."""
+    res, start = {}, 0
+    for _ in range(200):
+        q = urllib.parse.urlencode({"engine": "stock", "market": "bonds", "is_trading": 1, "iss.meta": "off", "iss.only": "securities", "start": start})
+        js = get(BASE + "/iss/securities.json?" + q, tries=2, soft=True)
+        rows = table(js, "securities") if js else []
+        new = 0
+        for r in rows:
+            key = r.get("emitent_inn") or r.get("emitent_id")
+            if r.get("secid") and key and r["secid"] not in res:
+                res[r["secid"]] = str(key)
+                new += 1
+        if not rows or not new:
+            break
+        start += len(rows)
+    return res
+
+
+def name_issuer(name):
+    m = re.match(r"^[^\d\s\-_,;]+", str(name))
+    return (m.group(0).lower() if m and len(m.group(0)) >= 3 else str(name).lower())
+
+
+def infer_ratings(out, issuers):
+    """Переносит рейтинг на выпуски без рейтинга, если у других выпусков того же эмитента он один и тот же. Помечает значком ~."""
+    groups = {}
+    for b in out.values():
+        if b["rt"] == "ОФЗ":
+            continue
+        key = issuers.get(b["sid"]) or "n:" + name_issuer(b["name"])
+        groups.setdefault(key, []).append(b)
+    done = 0
+    for bs in groups.values():
+        rated = {b["rt"] for b in bs if b["rt"] != "—" and not b["rt"].endswith("~")}
+        if len(rated) == 1:
+            r = next(iter(rated))
+            for b in bs:
+                if b["rt"] == "—":
+                    b["rt"] = r + "~"
+                    b["rti"] = 1
+                    done += 1
+    return done
 
 
 def load_block():
@@ -407,6 +480,9 @@ def main():
             else:
                 skipped[why] = skipped.get(why, 0) + 1
 
+    issuers = fetch_issuers()
+    inferred = infer_ratings(out, issuers)
+    print(f"Рейтинг перенесён по эмитенту (оценочный, значок ~) на {inferred} выпусков; эмитенты определены " + ("по данным биржи" if issuers else "по названию выпуска (список эмитентов биржи не получен)"))
     hist, ksrc = key_rate_history(today)
     kr0 = kr_at(hist, today)
     nohist = 0
@@ -438,6 +514,7 @@ def main():
     if old_universe >= 200 and universe < 0.7 * old_universe:
         raise SystemExit(f"Выпусков стало заметно меньше ({universe} против {old_universe}): данные не перезаписываю, проверьте ответ биржи и формат.")
     yield_check(out, today)
+    unrated = [n for n, b in out.items() if b["rt"] == "—"]
     print(f"Облигаций в data.json: {len(out)}; без рейтинга: {len(unrated)}; для квалифицированных: {sum(1 for b in out.values() if b.get('q'))}")
     print("Пропущено:", json.dumps(skipped, ensure_ascii=False))
     if unrated:
